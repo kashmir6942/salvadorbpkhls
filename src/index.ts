@@ -584,11 +584,43 @@ async function generateVariantPlaylist(channel: ChannelInfo, variantPath: string
     const parser = new DOMParser()
     const mpdDoc = parser.parseFromString(mpdText, "text/xml")
 
-    // Extract segment template or segment list
-    const segmentTemplates = mpdDoc.getElementsByTagName("SegmentTemplate")
-    const segmentLists = mpdDoc.getElementsByTagName("SegmentList")
+    // Extract base URL from MPD
+    const baseUrlElements = mpdDoc.getElementsByTagName("BaseURL")
+    let baseUrl = channel.mpdUrl.replace("/index.mpd", "")
+    if (baseUrlElements.length > 0) {
+      const baseUrlText = baseUrlElements[0].textContent
+      if (baseUrlText) {
+        baseUrl = baseUrlText.startsWith("http") ? baseUrlText : `${baseUrl}/${baseUrlText}`
+      }
+    }
 
-    let m3u8 = `#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n\n`
+    // Find video adaptation set
+    const adaptationSets = mpdDoc.getElementsByTagName("AdaptationSet")
+    let videoAdaptationSet = null
+
+    for (let i = 0; i < adaptationSets.length; i++) {
+      const mimeType = adaptationSets[i].getAttribute("mimeType") || ""
+      if (mimeType.includes("video")) {
+        videoAdaptationSet = adaptationSets[i]
+        break
+      }
+    }
+
+    if (!videoAdaptationSet) {
+      throw new Error("No video adaptation set found")
+    }
+
+    // Get segment template or list
+    const segmentTemplates = videoAdaptationSet.getElementsByTagName("SegmentTemplate")
+    const segmentLists = videoAdaptationSet.getElementsByTagName("SegmentList")
+
+    let m3u8 = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-TARGETDURATION:10
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:VOD
+
+`
 
     const channelId = getChannelId(channel)
 
@@ -605,56 +637,44 @@ async function generateVariantPlaylist(channel: ChannelInfo, variantPath: string
 
       // Add initialization segment if present
       if (initialization) {
-        m3u8 += `#EXT-X-MAP:URI="${origin}/segment/${channelId}/${initialization}"\n`
+        const initUrl = initialization.replace("$RepresentationID$", "video")
+        m3u8 += `#EXT-X-MAP:URI="${origin}/segment/${channelId}/${initUrl}"\n`
       }
 
-      // Generate segments (for live streams, generate a sliding window)
+      // Generate segments for live stream (last 10 segments)
       const currentTime = Math.floor(Date.now() / 1000)
-      const segmentCount = 10 // Keep last 10 segments for live streaming
+      const segmentCount = 10
 
       for (let i = 0; i < segmentCount; i++) {
         const segmentNumber = startNumber + i
         const segmentUrl = media
           .replace("$Number$", segmentNumber.toString())
-          .replace("$Time$", (currentTime + i * segmentDuration).toString())
+          .replace("$RepresentationID$", "video")
+          .replace("$Time$", (segmentNumber * duration).toString())
 
-        m3u8 += `#EXTINF:${segmentDuration.toFixed(1)},\n`
+        m3u8 += `#EXTINF:${segmentDuration.toFixed(3)},\n`
         m3u8 += `${origin}/segment/${channelId}/${segmentUrl}\n`
       }
     } else if (segmentLists.length > 0) {
       // Handle segment list
       const segmentList = segmentLists[0]
-      const segmentUrls = segmentList.getElementsByTagName("SegmentURL")
+      const segments = segmentList.getElementsByTagName("SegmentURL")
 
-      for (let i = 0; i < segmentUrls.length; i++) {
-        const segmentUrl = segmentUrls[i]
-        const media = segmentUrl.getAttribute("media") || `segment_${i}.m4s`
+      for (let i = 0; i < segments.length && i < 10; i++) {
+        const segment = segments[i]
+        const media = segment.getAttribute("media") || ""
 
         m3u8 += `#EXTINF:10.0,\n`
         m3u8 += `${origin}/segment/${channelId}/${media}\n`
       }
     } else {
-      // Fallback: generate basic segments for live streaming
-      const currentTime = Math.floor(Date.now() / 1000)
-      for (let i = 0; i < 10; i++) {
-        m3u8 += `#EXTINF:10.0,\n`
-        m3u8 += `${origin}/segment/${channelId}/segment_${currentTime + i}.ts\n`
-      }
+      throw new Error("No segment information found in MPD")
     }
 
     return m3u8
   } catch (error) {
     console.error("Error generating variant playlist:", error)
-    // Fallback playlist
-    const channelId = getChannelId(channel)
-    let m3u8 = `#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n\n`
-
-    for (let i = 0; i < 10; i++) {
-      m3u8 += `#EXTINF:10.0,\n`
-      m3u8 += `${origin}/segment/${channelId}/segment_${i}.ts\n`
-    }
-
-    return m3u8
+    throw error
   }
 }
 
@@ -664,41 +684,57 @@ async function handleSegmentRequest(
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
   try {
-    // Construct the actual segment URL from the MPD base
-    const baseUrl = channel.mpdUrl.replace("/index.mpd", "")
-    const segmentUrl = `${baseUrl}/${segmentPath}`
+    console.log(`[v0] Handling segment request: ${segmentPath}`)
 
-    console.log(`[v0] Fetching segment: ${segmentUrl}`)
+    // Construct the actual segment URL
+    let segmentUrl: string
 
-    // Fetch the encrypted segment
+    if (segmentPath.startsWith("http")) {
+      segmentUrl = segmentPath
+    } else {
+      const baseUrl = channel.mpdUrl.replace("/index.mpd", "")
+      segmentUrl = `${baseUrl}/${segmentPath}`
+    }
+
+    console.log(`[v0] Fetching segment from: ${segmentUrl}`)
+
+    // Fetch the segment
     const segmentResponse = await fetch(segmentUrl, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        Referer: baseUrl,
+        Referer: channel.mpdUrl,
       },
     })
 
     if (!segmentResponse.ok) {
-      console.log(`[v0] Segment not found: ${segmentResponse.status}`)
+      console.log(`[v0] Segment fetch failed: ${segmentResponse.status}`)
       return new Response("Segment not found", { status: 404, headers: corsHeaders })
     }
 
-    const encryptedData = await segmentResponse.arrayBuffer()
-    console.log(`[v0] Segment size: ${encryptedData.byteLength} bytes`)
+    const segmentData = await segmentResponse.arrayBuffer()
+    console.log(`[v0] Segment data size: ${segmentData.byteLength}`)
 
-    // Decrypt the segment using ClearKey
-    const decryptedData = await decryptSegment(encryptedData, channel.clearKey)
+    // Check if segment is encrypted (look for PSSH box or other encryption indicators)
+    const isEncrypted = await checkIfEncrypted(segmentData)
 
-    // Return the decrypted segment
-    return new Response(decryptedData, {
+    let finalData = segmentData
+
+    if (isEncrypted) {
+      console.log(`[v0] Decrypting segment with clearkey`)
+      finalData = await decryptSegment(segmentData, channel.clearKey)
+    }
+
+    // Return the segment data
+    return new Response(finalData, {
       headers: {
         ...corsHeaders,
-        "Content-Type": "video/mp4",
-        "Cache-Control": "public, max-age=3600",
+        "Content-Type": segmentPath.endsWith(".mp4") ? "video/mp4" : "video/mp2t",
+        "Cache-Control": "public, max-age=300",
+        "Accept-Ranges": "bytes",
       },
     })
   } catch (error) {
-    console.error("Error handling segment request:", error)
+    console.error(`[v0] Error handling segment request:`, error)
     return new Response("Segment error", { status: 500, headers: corsHeaders })
   }
 }
@@ -707,32 +743,53 @@ async function decryptSegment(encryptedData: ArrayBuffer, clearKey: ClearKeyInfo
   try {
     // Convert hex strings to ArrayBuffer
     const keyBuffer = hexToArrayBuffer(clearKey.key)
-    const ivBuffer = hexToArrayBuffer(clearKey.kid.padEnd(32, "0")) // Ensure 16 bytes for IV
 
-    console.log(`[v0] Decrypting with key: ${clearKey.key}, kid: ${clearKey.kid}`)
+    // For ClearKey, we need to extract the IV from the segment or use a default
+    // In most cases, the IV is derived from the segment or is all zeros for initialization
+    const iv = new ArrayBuffer(16) // 16 bytes of zeros for AES-128
 
-    // Import the key for AES-CTR decryption (commonly used for DASH)
+    // Import the key for AES-128-CTR decryption (ClearKey typically uses CTR mode)
     const cryptoKey = await crypto.subtle.importKey("raw", keyBuffer, { name: "AES-CTR" }, false, ["decrypt"])
 
     // Decrypt the data using AES-CTR
     const decryptedData = await crypto.subtle.decrypt(
       {
         name: "AES-CTR",
-        counter: ivBuffer,
+        counter: iv,
         length: 128,
       },
       cryptoKey,
       encryptedData,
     )
 
-    console.log(`[v0] Decryption successful, output size: ${decryptedData.byteLength} bytes`)
+    console.log(`[v0] Decryption successful, size: ${decryptedData.byteLength}`)
     return decryptedData
   } catch (error) {
-    console.error("Decryption error:", error)
+    console.error(`[v0] Decryption error:`, error)
     // Return original data if decryption fails
-    console.log(`[v0] Decryption failed, returning original data`)
     return encryptedData
   }
+}
+
+async function checkIfEncrypted(data: ArrayBuffer): Promise<boolean> {
+  // Simple check for common encryption indicators
+  const view = new Uint8Array(data)
+
+  // Look for PSSH box (Protection System Specific Header)
+  for (let i = 0; i < view.length - 4; i++) {
+    if (view[i] === 0x70 && view[i + 1] === 0x73 && view[i + 2] === 0x73 && view[i + 3] === 0x68) {
+      return true
+    }
+  }
+
+  // Look for encrypted sample entries
+  for (let i = 0; i < view.length - 4; i++) {
+    if (view[i] === 0x65 && view[i + 1] === 0x6e && view[i + 2] === 0x63 && view[i + 3] === 0x76) {
+      return true
+    }
+  }
+
+  return false
 }
 
 function hexToArrayBuffer(hex: string): ArrayBuffer {
