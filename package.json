@@ -1,0 +1,42 @@
+{
+  "name": "mpd-to-m3u8-converter",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker to convert MPD streams with ClearKey DRM to HLS format",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "wrangler deploy --dry-run"
+  },
+  "dependencies": {
+    "@xmldom/xmldom": "^0.8.10",
+    "next": "15.5.4",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "0.544.0",
+    "tailwind-merge": "3.3.1",
+    "tailwindcss-animate": "1.0.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240925.0",
+    "wrangler": "^3.78.12",
+    "typescript": "^5.6.2",
+    "@types/react": "19.1.15",
+    "@types/react-dom": "19.1.9",
+    "@types/node": "24.5.2",
+    "tailwindcss": "4.1.13",
+    "postcss": "8.5.6"
+  },
+  "keywords": [
+    "cloudflare-worker",
+    "mpd-to-hls",
+    "dash-to-hls",
+    "clearkey-drm",
+    "streaming-proxy",
+    "m3u8-converter"
+  ],
+  "author": "MPD to M3U8 Converter",
+  "license": "MIT"
+}
